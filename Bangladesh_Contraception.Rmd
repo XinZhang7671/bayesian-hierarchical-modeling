@@ -1,0 +1,701 @@
+---
+title: "Report"
+author: "Samuel Ingloff-Richards, Xin Zhang"
+date: "2025-01-12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache.path = "cache/")
+```
+
+```{r, echo=FALSE, warning=FALSE, eval=FALSE}
+library(rethinking)
+library(rstan)
+library(StanHeaders)
+set.seed(42) 
+```
+
+# Introduction
+
+Our report analyses the use of contraception from the 1989 Bangladesh Fertility Survey, `data(bangladesh)`, provided by the `rethinking` package. The data set contains 1934 Bangladeshi women with 6 features:
+
+-   `D` - each woman is assigned a district of Bangladesh.
+
+-   `C` - whether the woman has used contraception or not (0 or 1).
+
+-   `L` - how many living children the woman has (there are no women included without living children).
+
+-   `A` - the standardised centered age of the woman.
+
+-   `U` - whether the woman lives in an urban area or not (0 or 1).
+
+We compare three separate models to predict the use of contraception, one fixed effects mode, `fixed_effects`, one multilevel model without interaction, `multilevel`, and one multilevel model with interaction between Age and Living Children, `multilevel_int`. We conclude that the multilevel model including interaction is the most suitable model among these, based on having the lowest WAIC score and accounting for the correlation between the Living Children and Age coefficients seen in the standard multilevel model. This model predicts that the traits of having more living children, living in an urban area, and being older, all have a separate positive effect on contraception use. However, this model also finds a negative interaction effect between Living Children and Age, such that the trait of having many living children and being older will add an additional negative effect to the likelihood of contraception use. Finally, we find that all districts have a varying negative effect on the use of contraception.
+
+# Data Preparation
+
+```{r}
+data(bangladesh)
+d <- bangladesh
+
+# Standardise centred age
+age_centered_sd <- sd(d$age.centered)
+d$age.standardized <- d$age.centered / age_centered_sd
+
+# Number of predictions
+N_pred <- length(d$woman)
+
+# Counterfactual data for Stan generate section
+seq_pred <- list(D = seq(from = 1, to = 61, by = 1),
+                 A = seq(from = -14, to = 20, length.out = 10),
+                 U = seq(from = 0, to = 1, by = 1),
+                 L = seq(from = 1, to = 4, by = 1),
+                 L1 = rep(1, N_pred),
+                 L2 = rep(2, N_pred),
+                 L3 = rep(3, N_pred),
+                 L4 = rep(4, N_pred),
+                 U0 = rep(0, N_pred),
+                 U1 = rep(1, N_pred),
+                 A1 = rep(summary(d$age.standardized)["1st Qu."][[1]], N_pred),
+                 A2 = rep(summary(d$age.standardized)["Median"][[1]], N_pred),
+                 A3 = rep(summary(d$age.standardized)["3rd Qu."][[1]], N_pred))
+
+d.stan <- list(
+  N = length(d$woman),
+  D = d$district,
+  A = d$age.standardized,     
+  L = d$living.children,
+  U = d$urban,
+  C = d$use.contraception,
+  N_pred = N_pred,
+  L_pred_1 = seq_pred$L1,
+  L_pred_2 = seq_pred$L2,
+  L_pred_3 = seq_pred$L3,
+  L_pred_4 = seq_pred$L4,
+  U_pred_0 = seq_pred$U0,
+  U_pred_1 = seq_pred$U1,
+  A_pred_1 = seq_pred$A1,
+  A_pred_2 = seq_pred$A2,
+  A_pred_3 = seq_pred$A3
+)
+
+str(d.stan)
+```
+
+-   Why we standardised age, and why we did not alter other values.
+
+-   Issues with data (definitions and so on)
+
+# Model Selection
+
+We create three logistic models with fixed-effects, multilevel, and interaction. We use the logistic model (the logistic equation is graphed below in *figure 1*) since it has a fixed continuous range of 0 to 1 (in this case we use this as the probability of using contraception), regardless of the magnitude of the input. We base the logistic model structure on the model given by (Khan, 1997). Our models are finally fit on a Bernoulli distribution, as we are only working with two possible categorical outcomes: using contraception or not.
+
+We evaluate the parameters of each by `precis` and `traceplot` to check the estimated coefficients and the performance of the MCMC chains.
+
+## Prior Selection
+
+With no previous knowledge on the contraceptive use of Bangladeshi women, we aim to create wide variance priors, in order that the MCMC iteration process can traverse the widest distribution, but not so wide as to be stuck on the extremes of the logistic equation. By visual inspection of the logistic equation below (*Figure 1*) , we decided that choosing N(0,2) for all prior coefficients allows the MCMC iterations to traverse a large distribution without going too far (anything outside of the -10 to 10 interval).
+
+![](images/desmos-graph-01.png)
+
+*Figure 1, the logistic curve, with 95% confidence intervals for normal distributions N(0,2) and N(0,5)*. *Created with Desmos.*
+
+## Fixed-effects Model
+
+We start with a fixed-effects model with all parameters included. This is to see an initial MCMC model prediction, and compare with the later more complex models as a baseline.
+
+$$
+C\sim \text{bernoulli}(p)
+$$
+
+$$
+logit(p) = \alpha + \beta_d*D+\beta_l*L+\beta_a*A+\beta_u*U
+$$
+
+$$
+\alpha \sim N(0,1)
+$$
+
+$$
+\beta_d \sim N(0,2)
+$$
+
+$$
+\beta_l \sim N(0,2)
+$$
+
+$$
+\beta_a \sim N(0,2)
+$$
+
+$$
+\beta_u \sim N(0,2)
+$$
+
+```{r, warning=FALSE}
+fixed_effects_code <- "
+data{
+    int<lower=1> N;              
+    array[N] int<lower=1, upper=61> D; 
+    array[N] int<lower=0, upper=1> U;  
+    array[N] int<lower=0, upper=1> C;  
+    vector[N] L;                
+    vector[N] A;                 
+}
+parameters{
+    real alpha;
+    real beta_D;             
+    real beta_L;                 
+    real beta_A;                 
+    real beta_U;                
+}
+model{
+    alpha ~ normal(0,2);
+    beta_D ~ normal(0, 2);
+    beta_L ~ normal(0, 2);
+    beta_A ~ normal(0, 2);
+    beta_U ~ normal(0, 2);
+
+    for (i in 1:N) {
+        C[i] ~ bernoulli_logit(alpha + beta_D * D[i] + beta_L * L[i] + beta_A * A[i] + beta_U * U[i]);
+    }
+}
+generated quantities {
+    vector[N] log_lik;           
+    for (i in 1:N) {
+        log_lik[i] = bernoulli_lpmf(C[i] | inv_logit(alpha + beta_D * D[i] + beta_L * L[i] + beta_A * A[i] + beta_U * U[i]));
+    }
+}
+"
+
+fixed_effects <- rstan::stan(model_code = fixed_effects_code, 
+                               data = d.stan, 
+                               chains = 4, 
+                               iter = 2000, 
+                               warmup = 1000, 
+                               refresh = 0)
+```
+
+### Overview
+
+```{r}
+precis(fixed_effects)
+rstan::traceplot(fixed_effects, pars = c("alpha","beta_D","beta_L","beta_A","beta_U"))
+save(fixed_effects, file = "fixed_effects.RData")
+```
+
+All parameters have good chain mixing (shown by `traceplot` and supported by the low `R_hat` value) and low MCMC sampling autocorrelation given by `n_eff`. The District coefficient, `beta_D` appears to have an insignificant effect. The Urban coefficient, `beta_U` , has the greatest positive effect, followed by Living Children `beta_L`. Here `beta_A` has a negative effect.
+
+## Multilevel Model
+
+Since the District feature from the fixed-effects model has limited to no effect, we now treat District as a hierarchical variable instead, and remove alpha from the equation as it is absorbed by the hierarchical variable. Now each district has its own coefficient weighting, and we can see how each district varies in its effect.
+
+$$
+C\sim \text{bernoulli}(p)
+$$
+
+$$
+logit(p) = \beta[D]+\beta_l*L+\beta_a*A+\beta_u*U
+$$
+
+$$
+\beta[D] \sim N(\bar{\alpha},\sigma_d)
+$$
+
+$$
+\bar{\alpha} \sim N(0,1)
+$$
+
+$$
+\sigma_d \sim \text{exp}(1)
+$$
+
+$$
+\beta_l \sim N(0,2)
+$$
+
+$$
+\beta_a \sim N(0,2)
+$$
+
+```{r, warning=FALSE}
+multilevel_code <- "
+data{
+  int N; // Number of datapoints
+  
+  array[N] int<lower=0> D; // District of subject
+  vector[N] L; // number of living children
+  vector[N] A; // centered age
+  vector[N] U; // if urban
+  array[N] int<lower=0,upper=1> C; // if using contraception
+  
+  // Pred data
+  int<lower=0> N_pred;
+  
+}
+parameters{
+  vector[61] beta_D;
+  real alpha_bar;
+  real sigma_d;
+  real beta_L; // beta for living children
+  real beta_A; // beta for centered age of woman
+  real beta_U; // beta for if urban
+}
+model{
+  alpha_bar ~ normal(0, 1);
+  sigma_d ~ exponential(1);
+  beta_D ~ normal(alpha_bar, sigma_d);
+  beta_L ~ normal(0,2);
+  beta_A ~ normal(0,2);
+  beta_U ~ normal(0,2);
+  
+  vector[N] P; // probability woman uses contraception
+  P = inv_logit(beta_D[D] + beta_L*L + beta_A*A + beta_U*U); // just using district as multilevel effect
+  C ~ bernoulli(P);
+}
+generated quantities{
+  
+  // Standard
+  vector[N] log_lik;
+  array[N_pred] int C_pred;
+  vector[N_pred] P_pred;
+  
+  for (i in 1:N){
+    log_lik[i] = bernoulli_lpmf(C[i] | inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A[i] + beta_U*U[i]));
+  }
+  
+  for (i in 1:N_pred){
+     P_pred[i] = inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A[i] + beta_U*U[i]);
+     C_pred[i] = bernoulli_rng(P_pred[i]);
+  }
+}
+"
+
+multilevel <- stan(model_code = multilevel_code, 
+                   data = d.stan, 
+                   chains = 4, 
+                   iter = 2000, 
+                   warmup = 1000, 
+                   refresh = 0)
+```
+
+### Overview
+
+```{r}
+precis(multilevel,depth = 2, pars = c("beta_L","beta_A","beta_U"))
+rstan::traceplot(multilevel, pars = c("beta_L","beta_A","beta_U"))
+save(multilevel, file = "multilevel.RData")
+```
+
+Poor chain mixing for `beta_L` and `beta_A`, with low `n_eff` values. Similar coefficient distributions to the fixed-effects model, ignoring the hierarchical District coefficients.
+
+## Multilevel with Interaction Model
+
+$$
+C\sim \text{bernoulli}(p)
+$$
+
+$$
+logit(p) = \beta[D]+\beta_l*L+\beta_a*A+\beta_u*U + 
+\beta_{al}*A*L
+$$
+
+$$
+\beta[D] \sim N(\bar{\alpha},\sigma_d)
+$$
+
+$$
+\bar{\alpha} \sim N(0,1)
+$$
+
+$$
+\sigma_d \sim \text{exp}(1)
+$$
+
+$$
+\beta_l \sim N(0,2)
+$$
+
+$$
+\beta_a \sim N(0,2)
+$$
+
+$$
+\beta_u \sim N(0,2)
+$$
+
+$$
+\beta_{al} \sim N(0,2)
+$$
+
+### Interaction Variable Explanation
+
+We include an interaction effect between Age and Living Children, based on the assumption that the number of Living Children a woman has increases with Age.
+
+#### Box-plot of Age \~ Living Children in Data
+
+```{r}
+boxplot(d$age.standardized ~ d$living.children, 
+        xlab = "Living Children",
+        ylab = "Age Standardised")
+```
+
+We can see this relationship in the data with the box-plot above, where the mean Age increases with the number of living children. There are outliers since there can still be women with 1, 2 or 3 living children who are older.
+
+#### Correlations Visual between Coefficients in Multilevel Model
+
+```{r,warning=FALSE}
+pairs(multilevel, pars = c("alpha_bar", "sigma_d", "beta_A", "beta_L", "beta_U"))
+```
+
+We can also see this correlation in the multilevel model between `beta_A` and `beta_L` in the `pairs` graph above. Where the effect of Age is negatively correlated with the effect of Living Children. By including this interaction in the model we can see more clearly the individual effect of Age and Living Children, and see if there is an interaction found in the model as well.
+
+```{r, warning=FALSE}
+
+multilevel_int_code <- "
+data{
+    int<lower=1> N;              
+    array[N] int<lower=1, upper=61> D; 
+    array[N] int<lower=0, upper=1> U;  
+    array[N] int<lower=0, upper=1> C;  
+    vector[N] L;                
+    vector[N] A; 
+    
+    // Predictions
+    int<lower=0> N_pred;
+    
+    // Simulated data
+    array[N_pred] int<lower=0> L_pred_1; // all only have 1 child
+    array[N_pred] int<lower=0> L_pred_2; // all only have 2 children
+    array[N_pred] int<lower=0> L_pred_3;
+    array[N_pred] int<lower=0> L_pred_4;
+    array[N_pred] int<lower=0> U_pred_0; // all are not urban
+    array[N_pred] int<lower=0> U_pred_1; // are are urban
+    vector[N_pred] A_pred_1; // all ages are 1st quartile value 
+    vector[N_pred] A_pred_2; // all ages are median value 
+    vector[N_pred] A_pred_3; // all ages are 3rd quartile value 
+}
+parameters{
+    vector[61] beta_D;  
+    real alpha_bar;
+    real sigma_d;
+    real beta_L;                 
+    real beta_A;                 
+    real beta_U;
+    real beta_AL;
+}
+model{
+    beta_D ~ normal(alpha_bar, sigma_d);
+    alpha_bar ~ normal(0, 1);
+    sigma_d ~ exponential(1);
+    beta_L ~ normal(0, 2);
+    beta_A ~ normal(0, 2);
+    beta_U ~ normal(0, 2);
+    beta_AL ~ normal(0,2);
+
+    for (i in 1:N) {
+        C[i] ~ bernoulli_logit(beta_D[D[i]] + beta_L * L[i] + beta_A * A[i] + beta_U * U[i] + beta_AL * A[i] * L[i]);
+    }
+}
+generated quantities {
+    vector[N] log_lik;   
+    vector[N_pred] C_pred;
+    vector[N_pred] P_pred;
+    
+    for (i in 1:N) {
+        log_lik[i] = bernoulli_lpmf(C[i] | inv_logit(beta_D[D[i]] + beta_L * L[i] + beta_A * A[i] + beta_U * U[i] + beta_AL * A[i] * L[i]));
+    }
+    
+    for (i in 1:N_pred){
+        P_pred[i] = inv_logit(beta_D[D[i]] + beta_L * L[i] + beta_A * A[i] + beta_U * U[i] + beta_AL * A[i] * L[i]);   
+        C_pred[i] = bernoulli_rng(P_pred[i]); 
+    }
+  // Simulated Fixed Living Children = 1
+  array[N_pred] int C_pred_L1;
+  vector[N_pred] P_pred_L1;
+  
+  for (i in 1:N_pred){
+     P_pred_L1[i] = inv_logit(beta_D[D[i]] + beta_L*L_pred_1[i] + beta_A*A[i] + beta_U*U[i]);
+     C_pred_L1[i] = bernoulli_rng(P_pred_L1[i]);
+  }
+  
+  // Simulated Fixed Living Children = 2
+  array[N_pred] int C_pred_L2;
+  vector[N_pred] P_pred_L2;
+  
+  for (i in 1:N_pred){
+     P_pred_L2[i] = inv_logit(beta_D[D[i]] + beta_L*L_pred_2[i] + beta_A*A[i] + beta_U*U[i]);
+     C_pred_L2[i] = bernoulli_rng(P_pred_L2[i]);
+  }
+  
+  // Simulated Fixed Living Children = 3
+  array[N_pred] int C_pred_L3;
+  vector[N_pred] P_pred_L3;
+  
+  for (i in 1:N_pred){
+     P_pred_L3[i] = inv_logit(beta_D[D[i]] + beta_L*L_pred_3[i] + beta_A*A[i] + beta_U*U[i]);
+     C_pred_L3[i] = bernoulli_rng(P_pred_L3[i]);
+  }
+  
+  // Simulated Fixed Living Children = 4
+  array[N_pred] int C_pred_L4;
+  vector[N_pred] P_pred_L4;
+  
+  for (i in 1:N_pred){
+     P_pred_L4[i] = inv_logit(beta_D[D[i]] + beta_L*L_pred_4[i] + beta_A*A[i] + beta_U*U[i]);
+     C_pred_L4[i] = bernoulli_rng(P_pred_L4[i]);
+  }
+  
+  // Simulated Fixed Urban = 0
+  array[N_pred] int C_pred_U0;
+  vector[N_pred] P_pred_U0;
+  
+  for (i in 1:N_pred){
+     P_pred_U0[i] = inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A[i] + beta_U*U_pred_0[i]);
+     C_pred_U0[i] = bernoulli_rng(P_pred_U0[i]);
+  }
+  
+  // Simulated Fixed Urban = 1
+  array[N_pred] int C_pred_U1;
+  vector[N_pred] P_pred_U1;
+  
+  for (i in 1:N_pred){
+     P_pred_U1[i] = inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A[i] + beta_U*U_pred_1[i]);
+     C_pred_U1[i] = bernoulli_rng(P_pred_U1[i]);
+  }
+  
+  // Simulated Fixed Age = 1st Quartile Value
+  array[N_pred] int C_pred_A1;
+  vector[N_pred] P_pred_A1;
+  
+  for (i in 1:N_pred){
+     P_pred_A1[i] = inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A_pred_1[i] + beta_U*U[i]);
+     C_pred_A1[i] = bernoulli_rng(P_pred_A1[i]);
+  }
+  
+  // Simulated Fixed Age = Median Value
+  array[N_pred] int C_pred_A2;
+  vector[N_pred] P_pred_A2;
+  
+  for (i in 1:N_pred){
+     P_pred_A2[i] = inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A_pred_2[i] + beta_U*U[i]);
+     C_pred_A2[i] = bernoulli_rng(P_pred_A2[i]);
+  }
+
+  // Simulated Fixed Age = 3rd Quartile Value
+  array[N_pred] int C_pred_A3;
+  vector[N_pred] P_pred_A3;
+  
+  for (i in 1:N_pred){
+     P_pred_A3[i] = inv_logit(beta_D[D[i]] + beta_L*L[i] + beta_A*A_pred_3[i] + beta_U*U[i]);
+     C_pred_A3[i] = bernoulli_rng(P_pred_A3[i]);
+  }
+}
+"
+
+multilevel_int <- stan(model_code = multilevel_int_code, 
+                       data = d.stan, 
+                       chains = 4, 
+                       iter = 2000, 
+                       warmup = 1000, 
+                       refresh = 0)
+```
+
+### Overview
+
+```{r}
+precis(multilevel_int,depth = 2, pars = c("beta_L","beta_U","beta_A","beta_AL"))
+rstan::traceplot(multilevel_int, pars = c("beta_L","beta_U","beta_A","beta_AL"))
+save(multilevel_int, file = "multilevel_int.RData")
+```
+
+Once again poor mixing for `beta_A` and `beta_L`, but regardless we can see a clear where beta_A has now changed to a positive effect on contraception contrary to the multilevel model prediction, revealed by the inclusion of the interaction coefficient's negative effect.
+
+## Model Comparison
+
+```{r}
+compare(fixed_effects,multilevel,multilevel_int)
+```
+
+The multilevel model with interaction has the lowest WAIC, followed by the multilevel and fixed-effects model. This supports our inclusion of interaction between Age and Living Children, and setting Districts as a hierarchical variable. We will therefore use `multilevel_int` for our posterior predictions.
+
+### Influence of districts on contraception
+
+```{r}
+beta_samples <- rstan::extract(multilevel_int, pars = "beta_D")$beta
+
+beta_mean <- apply(beta_samples, 2, mean)  
+beta_CI <- apply(beta_samples, 2, quantile, probs = c(0.025, 0.975))  
+
+beta_summary <- data.frame(
+  district = 1:61,
+  mean = beta_mean,
+  lower = beta_CI[1, ],
+  upper = beta_CI[2, ]
+)
+
+beta_summary[which.max(abs(beta_summary$mean)), ]
+```
+```{r}
+barplot(beta_summary$mean, 
+        names.arg = beta_summary$district,    
+        col = "skyblue",                      
+        main = "Influence of District on Outcome",  
+        xlab = "District",                    
+        ylab = "Posterior(beta_district) Mean",       
+        las = 2,                             
+        cex.names = 0.8,
+        ylim = c(min(beta_summary$mean) - 0.5, max(beta_summary$mean) + 1.5) 
+)
+```
+A negative value indicates that the district has a negative effect on the use of contraception. In other words, All the districts have negative attitudes on contraception, especially people living in district 11 who are less likely to use contraception compared to those in other districts(-2.24)
+
+### Triptych plots
+
+```{r}
+pred_p_multi_inter <- rstan::extract(multilevel_int, pars = "P_pred")$P_pred
+pred_p_multi_inter_mean <- apply(pred_p_multi_inter, 2, mean)
+
+pred_p_multi <- rstan::extract(multilevel, pars = "P_pred")$P_pred
+pred_p_multi_mean <- apply(pred_p_multi, 2, mean)
+```
+
+```{r}
+summary(d.stan$A)
+```
+Divide Age range into three groups based on the 1st quartile, median, and 3rd quartile.
+```{r}
+A_group <- cut(d.stan$A, 
+                 breaks = c(-Inf, -0.84, 0.71, Inf), 
+                 labels = c("< -0.84", "-0.84 ~ 0.71", "> 0.71"))
+```
+```{r}
+par(mfrow = c(2, 3))
+
+for (s in levels(A_group)) {
+  idx <- which(A_group == s)
+  plot(d.stan$L[idx], d.stan$C[idx], xlim = c(1, 4), ylim = c(0, 1), xlab = "Living children", ylab = "probability of using C", pch = 16, col = "blue", xaxt = "n")
+  axis(1, at = 1:4, labels = 1:4)
+  title(main = paste("Age Group:", s))
+  x_vals <- d.stan$L[idx] 
+  y_vals <- pred_p_multi_mean[idx]
+  lines(x_vals, y_vals, col = col.alpha("black", 0.5), lwd = 1.2)
+}
+
+for (s in levels(A_group)) {
+  idx <- which(A_group == s)
+  plot(d.stan$L[idx], d.stan$C[idx], xlim = c(1, 4), ylim = c(0, 1), xlab = "Living children", ylab = "probability of using C", pch = 16, col = "blue", xaxt = "n")
+  axis(1, at = 1:4, labels = 1:4)
+  title(main = paste("Age Group:", s))
+  x_vals <- d.stan$L[idx] 
+  y_vals <- pred_p_multi_inter_mean[idx] 
+  lines(x_vals, y_vals, col = col.alpha("black", 0.5), lwd = 2)
+}
+```
+Top row: Without an interaction between Age and Living children. Bottom row: With an interaction between Age and Living children.
+After adding the interaction term, for Age Group < -0.84 (left column) and Age Group -0.84 ~ 0.71 (middle column), the probability shows little variation with an increase in Living children. However, for Age Group > 0.71 (right column), the probability changes to decreasing trend and the shape of the curve aligns more closely with the actual points (blue dots) at 0 significantly, indicating that the model fits the data better. Therefore, in the lower age group, the influence of Living children is weaker, while in the higher age group, it has a stronger effect on the probability.
+
+## Posterior Prediction
+
+```{r}
+pred_p_multi_inter_PI <- apply(pred_p_multi_inter, 2, PI)
+```
+
+To prevent all points from completely overlapping, add some random noise to the observed C, slightly spreading them around 0 and 1.
+
+```{r}
+# Add small-scale random noise
+plot(jitter(d.stan$C, amount = 0.1), pred_p_multi_inter_mean, col = rgb(0, 0, 1, 0.5), pch = 16,
+     xlab = "Observed C (jittered)", ylab = "Predicted mean of C",
+     main = "Posterior Prediction Plot")
+```
+In the comparison between prediction and actual outcome, the darker areas represent the predicted probabilities are concentrated. For non-use of contraception (0), the predicted probabilities concentrated range from 0.1 to 0.4, showing relatively good results. However, for contraception use (1), the predicted probabilities are more dispersed, concentrated range from 0.4 to 0.6, indicating a less favorable performance.
+
+```{r}
+boxplot(pred_p_multi_inter_mean ~ d.stan$C, col = c("blue", "orange"),
+        xlab = "Observed C", ylab = "Predicted mean of C",
+        main = "Boxplot of Posterior Predictions")
+
+```
+
+The blue box and the orange box is with no overlap, indicating that the model has strong classification performance. If the model performs well, the predicted probabilities for observed values of C=0 (box and median line) should be close to 0, while those for C=1 should be close to 1.
+The presence of many outliers near 1 in the blue box C=0 suggests that the model has incorrectly predicted some actual C=0 samples as C=1.
+
+## Counter-factual plots
+
+-   Justification for counter factual plots
+
+### Age as Intervention
+```{r}
+post <- extract.samples(multilevel_int)
+```
+
+```{r}
+str(post$beta_D)
+str(post$beta_L)
+```
+
+```{r}
+# parameters from the m_multilevel_interaction model
+
+beta <- post$beta_D       # size [4000, 61]
+beta_l <- post$beta_L   # size [4000]
+beta_a <- post$beta_A   # size [4000]
+beta_u <- post$beta_U   # size [4000]
+beta_al <- post$beta_AL # size [4000]
+```
+
+```{r}
+str(d.stan)
+summary(d.stan$A)
+```
+```{r}
+# only change the predictors A
+N <- d.stan$N
+D <- d.stan$D  # size [1934]
+L <- d.stan$L  # size [1934]
+U <- d.stan$U  # size [1934]
+sim_A <- seq(from = -2, to = 3, length.out = length(d.stan$A))
+str(sim_A)
+```
+
+```{r}
+inv_logit <- function(x) {
+  return(1 / (1 + exp(-x)))
+}
+
+sim_p <- matrix(NA, nrow = N, ncol = 4000)
+
+for (i in 1: N) {
+  
+  sim_p[i, ] <- inv_logit(beta[, D[i]] + beta_l * L[i] + beta_a * sim_A[i] + beta_u * U[i] + beta_al * sim_A[i] * L[i])
+}
+
+dim(sim_p)
+```
+
+```{r}
+sim_p_mean <- apply(sim_p, 1, mean)
+sim_p_PI <- apply(sim_p, 1, PI)
+
+str(sim_p_mean)
+```
+
+```{r}
+plot(sim_A, sim_p_mean, ylim = c(0, 1), type = "l",
+     xlab = "Manipulated A", 
+     ylab = "Counterfactual p_value")
+shade(sim_p_PI, sim_A, col = rgb(0, 0, 1, 0.2))
+```
+It shows that Age influences the probability of using contraception and it shows that increasing age does not lead to increasing probability 0f using contraception like we expected. For the blue shade is the prediction interval or each new sim A data.
+
+# References
+
+Desmos. [www.desmos.com](www.desmos.com). Accessed 10/01/2025.
+
+H.T.Abdullah Khan, A hierarchical model of contraceptive use in urban and rural Bangladesh, Contraception, Volume 55, Issue 2, 1997, Pages 91-96, ISSN 0010-7824, [https://doi.org/10.1016/S0010-7824(96)00278-8](https://doi.org/10.1016/S0010-7824(96)00278-8){.uri}. (<https://www.sciencedirect.com/science/article/pii/S0010782496002788>)
+
+# AI Usage
+
+We use Chat-GPT for help with coding (finding functions and debugging errors), as well as clarifying MCMC concepts.
