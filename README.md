@@ -5,7 +5,7 @@ This repository contains a Bayesian hierarchical logistic regression project dev
 The project models contraceptive use among Bangladeshi women using Bayesian fixed-effects and hierarchical logistic regression models implemented in Stan. Model performance is evaluated using WAIC, posterior predictive checks, and counterfactual analysis.
 
 <p align="center">
-  <img src="dag2.png" width="650">
+  <img src="figures/dag.png" width="650">
 </p>
 
 **Figure 1.** Final Bayesian hierarchical logistic regression model with district-level effects and an interaction between age and living children.
