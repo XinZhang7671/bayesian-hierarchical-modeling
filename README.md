@@ -8,3 +8,11 @@ The project models contraceptive use among Bangladeshi women using fixed-effects
 4. Compare Models using WAIC
 5. Posterior Prediction
 6. Counterfactual Analysis
+## Bayesian Hierarchical Model
+<p align="center">
+  <img src="dag1.png" width="650">
+</p>
+<p align="center">
+  <img src="dag2.png" width="650">
+</p>
+**Figure 1.** Final Bayesian hierarchical logistic regression model with district-level effects and an interaction between age and living children.
