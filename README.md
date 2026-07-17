@@ -4,12 +4,14 @@ The project models contraceptive use among Bangladeshi women using fixed-effects
 <p align="center">
   <img src="dag2.png" width="650">
 </p>
+
 **Variables**
 - **C**: Contraceptive use (0 = No, 1 = Yes)
 - **D**: District of residence
 - **L**: Number of living children
 - **A**: Standardized centered age
 - **U**: Urban residence (0 = Rural, 1 = Urban)
+
 **Figure 1.** Final Bayesian hierarchical logistic regression model with district-level effects and an interaction between age and living children.
 ## Workflow
 1. Load Bangladesh Fertility Survey
